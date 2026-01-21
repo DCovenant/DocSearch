@@ -52,9 +52,8 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all request headers
 )
 
-# Path to rendered_pages
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-rendered_pages_path = os.path.join(project_root, 'rendered_pages')
+# Path to rendered_pages - use environment variable or default to container mount path
+rendered_pages_path = os.getenv("RENDERED_PAGES_PATH", "/rendered_pages")
 
 if os.path.exists(rendered_pages_path):
     # Create a custom StaticFiles class with CORS headers

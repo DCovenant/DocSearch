@@ -315,10 +315,10 @@
           }
           
           // Draw in CSS pixel coordinates (canvas context is already scaled by DPR via setTransform)
-          ctx.fillStyle = 'rgba(255, 255, 0, 0.3)';
+          ctx.fillStyle = 'rgba(0, 255, 255, 0.4)';
           ctx.fillRect(finalX, finalY, finalWidth, finalHeight);
           
-          ctx.strokeStyle = 'rgba(255, 215, 0, 0.5)';
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
           ctx.lineWidth = 1;
           ctx.strokeRect(finalX, finalY, finalWidth, finalHeight);
 
