@@ -1,13 +1,15 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Query, Path as FastAPIPath
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 from elasticsearch import AsyncElasticsearch
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import os
+import secrets
 from PIL import Image
+from auth import get_auth_url, exchange_code_for_token, verify_token, create_session, get_current_user, require_auth, sessions
 
 # --- ELASTICSEARCH CONFIG ---
 ES_URL = os.getenv("ES_URL", "http://localhost:9200")  # Use env var or default to localhost
@@ -55,35 +57,6 @@ app.add_middleware(
 # Path to rendered_pages - use environment variable or default to container mount path
 rendered_pages_path = os.getenv("RENDERED_PAGES_PATH", "/rendered_pages")
 
-if os.path.exists(rendered_pages_path):
-    # Create a custom StaticFiles class with CORS headers
-    class CORSStaticFiles(StaticFiles):
-        async def __call__(self, scope, receive, send):
-            if scope["type"] != "http":
-                return await super().__call__(scope, receive, send)
-            
-            # For non-http requests (like websocket), we need to create a new send function
-            # that adds CORS headers to the response
-            async def send_with_cors(message):
-                if message["type"] == "http.response.start":
-                    headers = dict(message.get("headers", []))
-                    
-                    # Add CORS headers
-                    headers[b"access-control-allow-origin"] = b"http://localhost:5173"
-                    headers[b"access-control-allow-methods"] = b"GET, HEAD, OPTIONS"
-                    headers[b"access-control-allow-headers"] = b"*"
-                    
-                    message["headers"] = [(k, v) for k, v in headers.items()]
-                
-                await send(message)
-            
-            return await super().__call__(scope, receive, send_with_cors)
-
-    app.mount("/renderedpages", CORSStaticFiles(directory=rendered_pages_path), name="rendered_pages")
-    print(f"Mounted rendered_pages directory with CORS headers: {rendered_pages_path}")
-else:
-    print(f"Warning: rendered_pages directory not found at {rendered_pages_path}")
-
 # Model for POST body validation
 # Pydantic model describing the expected JSON body for the /search POST route.
 # When FastAPI sees this type used as a parameter it will automatically parse and validate
@@ -122,7 +95,7 @@ def generate_prefix_queries(term: str, base_boost: float = 10.0) -> list[dict]:
 # --- ROUTES ---
 
 @app.get("/indices")
-async def list_indices():
+async def list_indices(user: dict = Depends(require_auth)):
     """List all non-system Elasticsearch indices with doc counts"""
     try:
         stats = await es_client.cat.indices(format="json")
@@ -135,7 +108,7 @@ async def list_indices():
         raise HTTPException(status_code=502, detail={"message": "Elasticsearch error", "error": str(e)})
 
 @app.get("/suggest")
-async def suggest(q: str = Query(..., min_length=1)):
+async def suggest(q: str = Query(..., min_length=1), user: dict = Depends(require_auth)):
     """
     Suggest words using Elasticsearch prefix query on nested words.
     Returns unique words that start with the given prefix.
@@ -213,7 +186,7 @@ async def suggest(q: str = Query(..., min_length=1)):
 
 # POST search route with validation
 @app.post("/wordcheck")
-async def wordcheck(body: WordCheckRequest):
+async def wordcheck(body: WordCheckRequest, user: dict = Depends(require_auth)):
     """
     This is the main route the Vue frontend uses.
 
@@ -527,7 +500,7 @@ async def wordcheck(body: WordCheckRequest):
 
 # Add a direct path to access pre-rendered images
 @app.get("/rendered-image/{file_name}")
-async def get_rendered_image(file_name: str = FastAPIPath(..., description="Image filename with extension")):
+async def get_rendered_image(file_name: str = FastAPIPath(..., description="Image filename with extension"), user: dict = Depends(require_auth)):
     """
     Direct access to pre-rendered images by filename.
     
@@ -559,6 +532,39 @@ async def get_rendered_image(file_name: str = FastAPIPath(..., description="Imag
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error serving image: {str(e)}")
+
+# --- AUTH ROUTES ---
+
+@app.get("/auth/login")
+async def login():
+    """Redirect to Microsoft OAuth login"""
+    state = secrets.token_urlsafe(16)
+    return {"auth_url": get_auth_url(state)}
+
+@app.get("/auth/callback")
+async def auth_callback(code: str, state: str = ""):
+    """Handle OAuth callback, create session, redirect to frontend"""
+    tokens = await exchange_code_for_token(code)
+    user_info = verify_token(tokens["id_token"])
+    session_id = create_session(user_info)
+    # Redirect to frontend with session token
+    return RedirectResponse(f"http://localhost:5173/?session={session_id}")
+
+@app.get("/auth/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    """Get current user info"""
+    if not user:
+        return {"authenticated": False}
+    return {"authenticated": True, "user": user}
+
+@app.post("/auth/logout")
+async def logout(user: dict = Depends(require_auth)):
+    """Logout and invalidate session"""
+    # Find and remove user's session
+    for sid, sess in list(sessions.items()):
+        if sess["email"] == user["email"]:
+            del sessions[sid]
+    return {"success": True}
 
 # --- To run the server, use this command in your terminal ---
 # uvicorn server:app --reload --port 3000

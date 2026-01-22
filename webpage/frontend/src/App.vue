@@ -27,6 +27,46 @@
     hideSuggestions
   } from './components/Suggestions.js';
 
+  // Auth state
+  const user = ref(null);
+
+  // Check session on load
+  const checkAuth = async () => {
+    const session = localStorage.getItem('session_token');
+    if (!session) return;
+    try {
+      const resp = await axios.get('http://localhost:3000/auth/me', {
+        headers: { Authorization: `Bearer ${session}` }
+      });
+      if (resp.data.authenticated) user.value = resp.data.user;
+    } catch { localStorage.removeItem('session_token'); }
+  };
+
+  // Handle OAuth callback (session token in URL)
+  const handleOAuthCallback = () => {
+    const params = new URLSearchParams(window.location.search);
+    const session = params.get('session');
+    if (session) {
+      localStorage.setItem('session_token', session);
+      window.history.replaceState({}, '', '/'); // Clean URL
+      checkAuth();
+    }
+  };
+
+  const login = async () => {
+    const resp = await axios.get('http://localhost:3000/auth/login');
+    window.location.href = resp.data.auth_url;
+  };
+
+  const logout = async () => {
+    const session = localStorage.getItem('session_token');
+    await axios.post('http://localhost:3000/auth/logout', {}, {
+      headers: { Authorization: `Bearer ${session}` }
+    });
+    localStorage.removeItem('session_token');
+    user.value = null;
+  };
+
   const currentbuttonclicked = ref('')
   const myCheckbox = ref(false);
 
@@ -35,10 +75,15 @@
   const selectedIndex = ref(null);  // null = show landing page
   const indicesLoading = ref(true);
 
+  // Helper to get auth headers
+  const authHeaders = () => ({
+    headers: { Authorization: `Bearer ${localStorage.getItem('session_token')}` }
+  });
+
   // Fetch available indices on mount
   const fetchIndices = async () => {
     try {
-      const resp = await axios.get('http://localhost:3000/indices');
+      const resp = await axios.get('http://localhost:3000/indices', authHeaders());
       availableIndices.value = resp.data.indices || [];
     } catch (e) {
       console.error('Failed to fetch indices:', e);
@@ -59,7 +104,7 @@
   };
 
   // Application constants
-  const DEBUG_HIGHLIGHTS = true; // Set to true to show debug information on highlights
+  const DEBUG_HIGHLIGHTS = false; // Set to true to show debug information on highlights
 
   /* const searchTerm = ref('');         // Current text in the search input field */
   const lastSearchedTerm = ref('');   // Stores the last successfully searched term (prevents UI updating during typing)
@@ -315,7 +360,7 @@
           }
           
           // Draw in CSS pixel coordinates (canvas context is already scaled by DPR via setTransform)
-          ctx.fillStyle = 'rgba(0, 255, 255, 0.4)';
+          ctx.fillStyle = 'rgba(0, 255, 0, 0.4)';
           ctx.fillRect(finalX, finalY, finalWidth, finalHeight);
           
           ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
@@ -323,13 +368,12 @@
           ctx.strokeRect(finalX, finalY, finalWidth, finalHeight);
 
           if (DEBUG_HIGHLIGHTS) {
-            const debugInfo = `"${matchWord}" CSS:[${finalX.toFixed(0)},${finalY.toFixed(0)}] ` +
-                            `Size:${finalWidth.toFixed(0)}x${finalHeight.toFixed(0)} ` +
+            const debugInfo = `"${matchWord}"` +
                             `Conf:${(confidence * 100).toFixed(0)}%`;
                             
             const fontSize = Math.max(10, Math.min(12, zoomLevel.value * 8));
             ctx.font = `${fontSize}px monospace`;
-            ctx.fillStyle = 'rgba(0,0,0,0.8)';
+            ctx.fillStyle = '#000000';
             ctx.fillRect(finalX, finalY - fontSize - 4, ctx.measureText(debugInfo).width + 6, fontSize + 6);
             ctx.fillStyle = '#00ff00';
             ctx.fillText(debugInfo, finalX + 3, finalY - 3);
@@ -373,6 +417,8 @@
    * cross-device compatibility, including desktop mouse and mobile touch support.
    */
   onMounted(() => {
+    handleOAuthCallback(); // Check for OAuth callback token in URL
+    checkAuth();           // Restore session from localStorage
     fetchIndices();
     // Add global mouse event listeners for pan functionality
     // Using global listeners ensures smooth dragging even when mouse moves outside element
@@ -865,30 +911,28 @@
       currentIndexName.value = fileName;
       currentPageNumber.value = pageNumber;
       
-      // Build image URL - use pre-rendered images (200 DPI from OCR indexing)
-      const renderUrl = `http://localhost:3000/renderedpages/${fileName}_page_${pageNumber}.png`;
-      
+      // Build image URL - use protected endpoint for pre-rendered images
+      const renderUrl = `http://localhost:3000/rendered-image/${fileName}_page_${pageNumber}.png`;
+
       // Hold the ResizeObserver guard until the zoom sizing finishes
       isResizingProgrammatically.value = true;
 
-      // Set image URL directly - pre-rendered images are always available
-      resultImage.value = renderUrl;
-      
-      // Simple fallback check
-      fetch(renderUrl, { method: 'HEAD' })
+      // Fetch image with auth headers, convert to blob URL
+      fetch(renderUrl, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('session_token')}` }
+      })
         .then(response => {
-          if (response.ok) {
-            isLoading.value = false;
-          } else {
-            isLoading.value = false;
-            message.value = "Pre-rendered image not available.";
-            isResizingProgrammatically.value = false;
-          }
+          if (!response.ok) throw new Error('Image not found');
+          return response.blob();
+        })
+        .then(blob => {
+          resultImage.value = URL.createObjectURL(blob);
+          isLoading.value = false;
         })
         .catch(error => {
-          console.error("Error checking pre-rendered image:", error);
+          console.error("Error fetching image:", error);
           isLoading.value = false;
-          message.value = "Error fetching pre-rendered image.";
+          message.value = "Error fetching image.";
           isResizingProgrammatically.value = false;
         });
     }
@@ -914,7 +958,7 @@
         highlightAllWords: highlightAllWords.value,
         exactMatch: myCheckbox.value,
         indexName: selectedIndex.value || '*'
-      });
+      }, authHeaders());
       
       // Handle JSON response properly
       if (response.data.success) {
@@ -962,12 +1006,25 @@
 </script>
 
 <template>
-  <!-- Main container -->
-  <div class="main-container">
+  <!-- Login screen - blocks app until authenticated -->
+  <div v-if="!user" class="login-screen">
+    <div class="login-box">
+      <h1>DocSearch</h1>
+      <p>Please sign in to continue</p>
+      <button class="login-btn" @click="login">Sign in with Microsoft</button>
+    </div>
+  </div>
+
+  <!-- Main app - only shown when authenticated -->
+  <div v-else class="main-container">
     <!-- Title bar -->
     <header class="title-bar">
-      <h1>DocSearch</h1>
       <button v-if="selectedIndex" class="back-button" @click="backToIndices">← Back to Indices</button>
+      <h1>DocSearch</h1>
+      <div class="auth-section">
+        <span class="user-email">{{ user.email }}</span>
+        <button class="auth-button" @click="logout">Logout</button>
+      </div>
     </header>
 
     <!-- Landing page: Index selection -->
@@ -1181,6 +1238,49 @@
   font-family: monospace;
   z-index: 20;
   pointer-events: none;
+}
+
+/* Login screen - full page blocker */
+.login-screen {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%);
+}
+
+.login-box {
+  text-align: center;
+  padding: 40px 60px;
+  background: #252525;
+  border-radius: 8px;
+  border: 1px solid #444;
+}
+
+.login-box h1 {
+  color: #fff;
+  margin: 0 0 10px 0;
+  font-size: 28px;
+}
+
+.login-box p {
+  color: #888;
+  margin: 0 0 30px 0;
+}
+
+.login-btn {
+  background: #0078d4;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  font-size: 16px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.login-btn:hover {
+  background: #0086f0;
 }
 
 /* Global styles to ensure full page coverage */
@@ -1458,7 +1558,31 @@ html, body {
   font-size: 18px;
   font-weight: bold;
   color: #ffffff;
-  display: inline;
+}
+
+.auth-section {
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.user-email {
+  color: #aaa;
+  font-size: 12px;
+}
+
+.auth-button {
+  background: #444;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.auth-button:hover {
+  background: #555;
 }
 
 .back-button {
