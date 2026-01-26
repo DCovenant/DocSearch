@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir \
     numba \
     "elasticsearch>=8.0.0,<9.0.0" \
     tqdm \
-    python-doctr
+    psutil
 
 # Install poppler for pdf2image
 RUN apt-get update && apt-get install -y poppler-utils && rm -rf /var/lib/apt/lists/*

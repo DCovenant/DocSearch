@@ -14,6 +14,7 @@
 
   import { ref, watch, onMounted, onUnmounted, computed } from 'vue';
   import axios from 'axios';
+  import { API_URL } from './config.js';
   import {
     fetchSuggestions,
     handleBlur,
@@ -35,7 +36,7 @@
     const session = localStorage.getItem('session_token');
     if (!session) return;
     try {
-      const resp = await axios.get('http://localhost:3000/auth/me', {
+      const resp = await axios.get(`${API_URL}/auth/me`, {
         headers: { Authorization: `Bearer ${session}` }
       });
       if (resp.data.authenticated) user.value = resp.data.user;
@@ -54,13 +55,13 @@
   };
 
   const login = async () => {
-    const resp = await axios.get('http://localhost:3000/auth/login');
+    const resp = await axios.get(`${API_URL}/auth/login`);
     window.location.href = resp.data.auth_url;
   };
 
   const logout = async () => {
     const session = localStorage.getItem('session_token');
-    await axios.post('http://localhost:3000/auth/logout', {}, {
+    await axios.post(`${API_URL}/auth/logout`, {}, {
       headers: { Authorization: `Bearer ${session}` }
     });
     localStorage.removeItem('session_token');
@@ -83,7 +84,7 @@
   // Fetch available indices on mount
   const fetchIndices = async () => {
     try {
-      const resp = await axios.get('http://localhost:3000/indices', authHeaders());
+      const resp = await axios.get(`${API_URL}/indices`, authHeaders());
       availableIndices.value = resp.data.indices || [];
     } catch (e) {
       console.error('Failed to fetch indices:', e);
@@ -94,6 +95,23 @@
 
   const selectIndex = (indexName) => {
     selectedIndex.value = indexName;
+  };
+
+  const formatPath = (path) => {
+    if (!path) return '';
+    return path.replace(/^\/mnt\/[a-z]\//i, '').replace(/\/$/, '');
+  };
+
+  const toWindowsPath = (path) => {
+    if (!path) return '';
+    const match = path.match(/^\/mnt\/([a-z])\/(.*)/i);
+    if (match) return `${match[1].toUpperCase()}:\\${match[2].replace(/\//g, '\\')}`;
+    return path.replace(/\//g, '\\');
+  };
+
+  const copyPath = async (path, event) => {
+    event.stopPropagation();
+    await navigator.clipboard.writeText(toWindowsPath(path));
   };
 
   const backToIndices = () => {
@@ -367,17 +385,16 @@
           ctx.lineWidth = 1;
           ctx.strokeRect(finalX, finalY, finalWidth, finalHeight);
 
-          if (DEBUG_HIGHLIGHTS) {
-            const debugInfo = `"${matchWord}"` +
-                            `Conf:${(confidence * 100).toFixed(0)}%`;
-                            
-            const fontSize = Math.max(10, Math.min(12, zoomLevel.value * 8));
-            ctx.font = `${fontSize}px monospace`;
-            ctx.fillStyle = '#000000';
-            ctx.fillRect(finalX, finalY - fontSize - 4, ctx.measureText(debugInfo).width + 6, fontSize + 6);
-            ctx.fillStyle = '#00ff00';
-            ctx.fillText(debugInfo, finalX + 3, finalY - 3);
-        }
+          const debugInfo = `"${matchWord}"` +
+                          `Conf:${(confidence * 100).toFixed(0)}%`;
+                          
+          const fontSize = Math.max(10, Math.min(12, zoomLevel.value * 8));
+          ctx.font = `${fontSize}px monospace`;
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(finalX, finalY - fontSize - 4, ctx.measureText(debugInfo).width + 6, fontSize + 6);
+          ctx.fillStyle = '#00ff00';
+          ctx.fillText(debugInfo, finalX + 3, finalY - 3);
+        
       } catch (err) {
         console.error(`Error drawing highlight for match #${index}:`, err);
       }
@@ -912,7 +929,7 @@
       currentPageNumber.value = pageNumber;
       
       // Build image URL - use protected endpoint for pre-rendered images
-      const renderUrl = `http://localhost:3000/rendered-image/${fileName}_page_${pageNumber}.png`;
+      const renderUrl = `${API_URL}/rendered-image/${fileName}_page_${pageNumber}.png`;
 
       // Hold the ResizeObserver guard until the zoom sizing finishes
       isResizingProgrammatically.value = true;
@@ -953,7 +970,7 @@
     lastSearchedTerm.value = searchTerm.value.trim();
     
     try {
-      const response = await axios.post('http://localhost:3000/wordcheck', {
+      const response = await axios.post(`${API_URL}/wordcheck`, {
         searchTerm: lastSearchedTerm.value,
         highlightAllWords: highlightAllWords.value,
         exactMatch: myCheckbox.value,
@@ -1039,8 +1056,9 @@
           class="index-card"
           @click="selectIndex(idx.name)"
         >
+          <span v-if="idx.folder_path" class="copy-icon" @click="copyPath(idx.folder_path, $event)" title="Copy Windows path">📋</span>
           <span class="index-name">{{ idx.name }}</span>
-          <span class="index-docs">{{ idx.docs.toLocaleString() }} documents</span>
+          <span v-if="idx.folder_path" class="index-path">{{ formatPath(idx.folder_path) }}</span>
         </button>
       </div>
     </div>
@@ -1053,24 +1071,23 @@
         <div class="section">
           <p class="section-title">Word to search:</p>
           
-          <!-- Folder filter buttons -->
-          <div v-if="uniqueFolders.length > 1" class="filter-buttons">
-            <button 
-              class="filter-button" 
-              :class="{ 'active': selectedFolderFilter === 'all' }"
-              @click="selectedFolderFilter = 'all'"
+          <!-- Folder filter dropdown -->
+          <div v-if="uniqueFolders.length > 1" class="filter-dropdown">
+            <label for="folder-filter">Filter by folder:</label>
+            <select 
+              id="folder-filter"
+              v-model="selectedFolderFilter"
+              class="folder-select"
             >
-              All
-            </button>
-            <button 
-              v-for="folder in uniqueFolders"
-              :key="folder"
-              class="filter-button" 
-              :class="{ 'active': selectedFolderFilter === folder }"
-              @click="selectedFolderFilter = folder"
-            >
-              {{ folder }}
-            </button>
+              <option value="all">All</option>
+              <option 
+                v-for="folder in uniqueFolders"
+                :key="folder"
+                :value="folder"
+              >
+                {{ folder }}
+              </option>
+            </select>
           </div>
           <div class="search-wrapper">
             <input 
@@ -1625,8 +1642,9 @@ html, body {
 }
 
 .indices-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 20px;
   max-width: 1000px;
   width: 100%;
@@ -1638,6 +1656,7 @@ html, body {
   align-items: center;
   justify-content: center;
   padding: 30px 20px;
+  min-width: 250px;
   background: #2a2a2a;
   border: 2px solid #444;
   border-radius: 8px;
@@ -1651,11 +1670,36 @@ html, body {
   transform: translateY(-2px);
 }
 
+.index-card {
+  position: relative;
+}
+
+.copy-icon {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.copy-icon:hover {
+  opacity: 1;
+}
+
 .index-name {
   font-size: 18px;
   font-weight: bold;
   color: #0078d4;
   margin-bottom: 8px;
+}
+
+.index-path {
+  font-size: 11px;
+  color: #888;
+  word-break: break-all;
+  max-width: 200px;
 }
 
 .index-docs {
@@ -1746,15 +1790,21 @@ button:hover {
   background-color: #0086f0;
 }
 
-/* Filter buttons styling */
-.filter-buttons {
-  display: flex;
-  gap: 6px;
+/* Filter dropdown styling */
+.filter-dropdown {
   margin-bottom: 12px;
-  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.filter-button {
+.filter-dropdown label {
+  color: #cccccc;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.folder-select {
   flex: 1;
   padding: 6px 10px;
   font-size: 12px;
@@ -1764,20 +1814,18 @@ button:hover {
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.2s ease;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 120px;
 }
 
-.filter-button:hover {
+.folder-select:hover {
   background-color: #3a3a3a;
   border-color: #555;
 }
 
-.filter-button.active {
-  background-color: #0078d4;
-  color: white;
+.folder-select:focus {
+  outline: none;
   border-color: #0086f0;
+  box-shadow: 0 0 0 2px rgba(0, 134, 240, 0.2);
 }
 
 /* Toggle switch styling */

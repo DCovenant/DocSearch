@@ -11,8 +11,9 @@ import secrets
 from PIL import Image
 from auth import get_auth_url, exchange_code_for_token, verify_token, create_session, get_current_user, require_auth, sessions
 
-# --- ELASTICSEARCH CONFIG ---
-ES_URL = os.getenv("ES_URL", "http://localhost:9200")  # Use env var or default to localhost
+# --- CONFIG ---
+ES_URL = os.getenv("ES_URL", "http://localhost:9200")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 ALL_INDICES = "*"  # Wildcard to search all indices
 PRIMARY_IMAGES_FOLDER = "images"  # Folder where the unrendered images are
 RENDERED_IMAGES_FOLDER = "rendered_pages"
@@ -48,7 +49,7 @@ app = FastAPI(lifespan=lifespan)
 # headers are present. This middleware sets permissive headers so the frontend can call the API.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # change to ["*"] for quick dev testing
+    allow_origins=["*"],  # Allow all origins for LAN access
     allow_credentials=True,
     allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
     allow_headers=["*"],  # Allow all request headers
@@ -96,13 +97,23 @@ def generate_prefix_queries(term: str, base_boost: float = 10.0) -> list[dict]:
 
 @app.get("/indices")
 async def list_indices(user: dict = Depends(require_auth)):
-    """List all non-system Elasticsearch indices with doc counts"""
+    """List all non-system Elasticsearch indices with doc counts and folder paths"""
     try:
         stats = await es_client.cat.indices(format="json")
-        indices = [
-            {"name": idx["index"], "docs": int(idx.get("docs.count", 0))}
-            for idx in stats if not idx["index"].startswith(".")
-        ]
+        indices = []
+        for idx in stats:
+            if idx["index"].startswith("."):
+                continue
+            index_name = idx["index"]
+            folder_path = ""
+            try:
+                sample = await es_client.search(index=index_name, size=1, _source=["folder_path"])
+                hits = sample.get("hits", {}).get("hits", [])
+                if hits:
+                    folder_path = hits[0].get("_source", {}).get("folder_path", "")
+            except:
+                pass
+            indices.append({"name": index_name, "docs": int(idx.get("docs.count", 0)), "folder_path": folder_path})
         return {"indices": sorted(indices, key=lambda x: x["name"])}
     except Exception as e:
         raise HTTPException(status_code=502, detail={"message": "Elasticsearch error", "error": str(e)})
@@ -548,7 +559,7 @@ async def auth_callback(code: str, state: str = ""):
     user_info = verify_token(tokens["id_token"])
     session_id = create_session(user_info)
     # Redirect to frontend with session token
-    return RedirectResponse(f"http://localhost:5173/?session={session_id}")
+    return RedirectResponse(f"{FRONTEND_URL}/?session={session_id}")
 
 @app.get("/auth/me")
 async def get_me(user: dict = Depends(get_current_user)):
